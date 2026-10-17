@@ -27,7 +27,9 @@ jobs:
           command: ruff check app tests
       - run:
           name: Unit tests with coverage
-          command: pytest -q --cov=app.fares --cov-report=term-missing tests/test_fares.py
+          command: |
+            export PYTHONPATH="${PWD}:${PYTHONPATH:-}"
+            python -m pytest -q --cov=app.fares --cov-report=term-missing tests/test_fares.py
 
   integration-tests:
     docker:
@@ -68,11 +70,10 @@ jobs:
                     with psycopg.connect(database_url, connect_timeout=2):
                         pass
 
-                    redis_client = redis.Redis.from_url(
+                    client = redis.Redis.from_url(
                         redis_url, socket_connect_timeout=2
                     )
-
-                    if redis_client.ping():
+                    if client.ping():
                         print("PostgreSQL and Redis are ready.")
                         break
                 except Exception as exc:
@@ -111,7 +112,9 @@ jobs:
             PY
       - run:
           name: Run test suite
-          command: pytest -q
+          command: |
+            export PYTHONPATH="${PWD}:${PYTHONPATH:-}"
+            python -m pytest -q
 
   build-and-push:
     parameters:
