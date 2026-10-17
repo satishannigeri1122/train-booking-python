@@ -1,0 +1,190 @@
+version: 2.1
+
+jobs:
+  secret-scan:
+    docker:
+      - image: zricethezav/gitleaks:v8.24.2
+    steps:
+      - checkout
+      - run:
+          name: Scan repository for secrets
+          command: gitleaks detect --source . --no-git --redact --exit-code 1
+
+  lint-and-unit-tests:
+    docker:
+      - image: cimg/python:3.12
+    steps:
+      - checkout
+      - run:
+          name: Install dependencies
+          command: |
+            python -m pip install --upgrade pip
+            pip install -r requirements.txt
+            pip install pytest pytest-cov ruff
+      - run:
+          name: Ruff lint
+          command: ruff check app tests
+      - run:
+          name: Unit tests with coverage
+          command: pytest -q --cov=app.fares --cov-report=term-missing tests/test_fares.py
+
+  integration-tests:
+    docker:
+      - image: cimg/python:3.12
+      - image: cimg/postgres:16.4
+        environment:
+          POSTGRES_DB: trainbooking
+          POSTGRES_USER: trainuser
+          POSTGRES_PASSWORD: trainpass
+      - image: cimg/redis:7.4
+    environment:
+      DATABASE_URL: postgresql://trainuser:trainpass@localhost:5432/trainbooking
+      REDIS_URL: redis://localhost:6379/0
+    steps:
+      - checkout
+      - run:
+          name: Install PostgreSQL client and test dependencies
+          command: |
+            sudo apt-get update
+            sudo apt-get install -y postgresql-client
+            python -m pip install --upgrade pip
+            pip install -r requirements.txt
+            pip install pytest
+      - run:
+          name: Wait for PostgreSQL and Redis
+          command: |
+            python -\<<'PY'
+            import os
+            import time
+            import psycopg
+            import redis
+
+            database_url = os.environ["DATABASE_URL"]
+            redis_url = os.environ["REDIS_URL"]
+
+            for attempt in range(30):
+                try:
+                    with psycopg.connect(database_url, connect_timeout=2):
+                        pass
+                    redis_client = redis.Redis.from_url(
+                        redis_url, socket_connect_timeout=2
+                    )
+                    if redis_client.ping():
+                        print("PostgreSQL and Redis are ready.")
+                        break
+                except Exception as exc:
+                    if attempt == 29:
+                        raise RuntimeError(
+                            "PostgreSQL or Redis did not become ready."
+                        ) from exc
+                    time.sleep(2)
+            else:
+                raise RuntimeError("Services did not become ready.")
+            PY
+      - run:
+          name: Apply database migrations
+          command: |
+            for file in migrations/*.sql; do
+              echo "Applying $file"
+              PGPASSWORD=trainpass psql "$DATABASE_URL" \
+                -v ON_ERROR_STOP=1 -f "$file"
+            done
+      - run:
+          name: Verify database and Redis connectivity
+          command: |
+            python -\<<'PY'
+            import os
+            import psycopg
+            import redis
+
+            with psycopg.connect(os.environ["DATABASE_URL"]) as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT 1")
+                    assert cur.fetchone() == (1,)
+
+            client = redis.Redis.from_url(os.environ["REDIS_URL"])
+            assert client.ping() is True
+            print("Database query and Redis ping passed.")
+            PY
+      - run:
+          name: Run test suite
+          command: pytest -q
+
+  build-and-push:
+    parameters:
+      image_tag:
+        type: string
+    docker:
+      - image: cimg/base:stable
+    steps:
+      - checkout
+      - setup_remote_docker
+      - run:
+          name: Build and push Docker image
+          command: |
+            set -euo pipefail
+
+            IMAGE="satishannigeri1122/train-booking-python"
+            SHORT_SHA="$(echo "$CIRCLE_SHA1" | cut -c1-7)"
+            MOVING_TAG="<< parameters.image_tag >>"
+            COMMIT_TAG="${MOVING_TAG}-${SHORT_SHA}"
+
+            test -n "$DOCKERHUB_USER"
+            test -n "$DOCKERHUB_TOKEN"
+
+            echo "$DOCKERHUB_TOKEN" | docker login \
+              --username "$DOCKERHUB_USER" \
+              --password-stdin
+
+            docker build \
+              -t "${IMAGE}:${MOVING_TAG}" \
+              -t "${IMAGE}:${COMMIT_TAG}" .
+
+            docker push "${IMAGE}:${MOVING_TAG}"
+            docker push "${IMAGE}:${COMMIT_TAG}"
+
+            docker logout
+
+workflows:
+  main-ci:
+    jobs:
+      - secret-scan:
+          filters:
+            branches:
+              only: main
+      - lint-and-unit-tests:
+          filters:
+            branches:
+              only: main
+      - integration-tests:
+          filters:
+            branches:
+              only: main
+      - build-and-push:
+          name: publish-qa-image
+          image_tag: qa
+          requires:
+            - secret-scan
+            - lint-and-unit-tests
+            - integration-tests
+          filters:
+            branches:
+              only: main
+
+  staging-deployment-image:
+    jobs:
+      - build-and-push:
+          name: publish-stage-image
+          image_tag: stage
+          filters:
+            branches:
+              only: staging
+
+  production-deployment-image:
+    jobs:
+      - build-and-push:
+          name: publish-prod-image
+          image_tag: prod
+          filters:
+            branches:
+              only: prod
