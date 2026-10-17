@@ -1,3 +1,4 @@
+
 version: 2.1
 
 jobs:
@@ -53,7 +54,7 @@ jobs:
       - run:
           name: Wait for PostgreSQL and Redis
           command: |
-            python -\<<'PY'
+            python - \<<'PY'
             import os
             import time
             import psycopg
@@ -66,9 +67,11 @@ jobs:
                 try:
                     with psycopg.connect(database_url, connect_timeout=2):
                         pass
+
                     redis_client = redis.Redis.from_url(
                         redis_url, socket_connect_timeout=2
                     )
+
                     if redis_client.ping():
                         print("PostgreSQL and Redis are ready.")
                         break
@@ -92,7 +95,7 @@ jobs:
       - run:
           name: Verify database and Redis connectivity
           command: |
-            python -\<<'PY'
+            python - \<<'PY'
             import os
             import psycopg
             import redis
@@ -151,15 +154,24 @@ workflows:
       - secret-scan:
           filters:
             branches:
-              only: main
+              only:
+                - main
+                - feature/booking-improvement
+
       - lint-and-unit-tests:
           filters:
             branches:
-              only: main
+              only:
+                - main
+                - feature/booking-improvement
+
       - integration-tests:
           filters:
             branches:
-              only: main
+              only:
+                - main
+                - feature/booking-improvement
+
       - build-and-push:
           name: publish-qa-image
           image_tag: qa
